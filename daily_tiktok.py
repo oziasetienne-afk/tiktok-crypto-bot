@@ -1,38 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Daily TikTok Crypto — script + audio par email (remplace le Pipeline 1 n8n).
-Gratuit et pérenne : tourne via GitHub Actions (cron quotidien).
+Daily TikTok Crypto — bot gratuit & perenne (GitHub Actions).
 
-Étapes :
-  1. Récupère les articles crypto récents de 3 flux RSS (CoinDesk, CryptoNews, Decrypt)
-  2. Génère un script TikTok FR (Claude Haiku) avec hashtags
-  3. Note la "viralité" du script (garde le meilleur, vise un score >= 6)
-  4. Voix ElevenLabs alternée selon le jour (pair / impair)
-  5. Envoie le script + l'audio MP3 par email (suivi de progression)
-  6. En cas d'erreur : email d'alerte
+Chaque jour :
+  RSS crypto (CoinDesk + CryptoNews + Decrypt)
+  -> choix de l'article le plus "viral"
+  -> script TikTok FR (Claude Haiku, avec hashtags)
+  -> (optionnel) voix ElevenLabs alternee, commitee dans le repo
+  -> LIVRAISON : ouverture d'une Issue GitHub avec le script
+     + @mention du proprietaire  ==>  GitHub t'envoie un EMAIL automatiquement.
 
-Tous les secrets viennent des variables d'environnement (GitHub Secrets) —
-aucune clé n'est écrite dans le code.
+Aucun mot de passe Gmail requis : on utilise le GITHUB_TOKEN fourni par Actions.
+
+Secrets requis :
+  ANTHROPIC_API_KEY   (obligatoire)
+Secrets optionnels :
+  ELEVENLABS_API_KEY  (si present -> ajoute l'audio MP3)
+Variables fournies AUTOMATIQUEMENT par GitHub Actions :
+  GITHUB_TOKEN, GITHUB_REPOSITORY
 """
 
-import os
-import sys
 import base64
 import datetime as dt
-import smtplib
+import os
 import re
-from email.message import EmailMessage
+import sys
+import traceback
 
-import requests
 import feedparser
+import requests
 
 # ---------------------------------------------------------------- config
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
-GMAIL_USER = os.environ.get("GMAIL_USER", "")          # ex: moncompte.scenes@gmail.com
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
-MAIL_TO = os.environ.get("MAIL_TO", GMAIL_USER)        # par défaut, s'envoie à soi-même
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "").strip()  # "owner/repo"
 
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
@@ -42,176 +45,192 @@ RSS_FEEDS = [
     "https://decrypt.co/feed",
 ]
 
-# Amélioration #4 : voix alternée selon le jour
-VOICE_EVEN = "JBFqnCBsd6RMkjVDRZzb"   # jour pair
-VOICE_ODD = "EXAVITQu4vr4xnSDxMaL"    # jour impair
+HASHTAGS = "#crypto #bitcoin #btc #cryptofr #actualitécrypto #blockchain"
 
-SHOCK_WORDS = ["officiel", "record", "crash", "pump", "sec", "etf", "explose",
-               "alerte", "historique", "interdit", "approuvé", "milliard"]
+# Voix ElevenLabs alternees jour pair / impair
+VOICE_EVEN = "JBFqnCBsd6RMkjVDRZzb"
+VOICE_ODD = "EXAVITQu4vr4xnSDxMaL"
+
+SHOCK_WORDS = [
+    "krach", "explose", "record", "chute", "alerte", "arnaque", "piratage",
+    "milliard", "million", "interdit", "scandale", "boom", "flambee",
+    "effondrement", "historique", "urgent",
+]
 
 
 # ---------------------------------------------------------------- helpers
-def log(msg):
-    print(f"[{dt.datetime.now().isoformat(timespec='seconds')}] {msg}", flush=True)
+def viral_score(text: str) -> int:
+    t = (text or "").lower()
+    score = 0
+    if re.search(r"\d", t):
+        score += 3
+    if any(w in t for w in SHOCK_WORDS):
+        score += 2
+    if len(t.split()) < 80:
+        score += 2
+    if re.search(r"[\U0001F300-\U0001FAFF]", text or ""):
+        score += 1
+    return score
 
 
-def fetch_articles():
-    """Récupère les articles récents des 3 flux, triés du plus récent au plus ancien."""
+def get_articles():
     items = []
     for url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
             for e in feed.entries[:10]:
-                title = (e.get("title") or "").strip()
-                summary = re.sub("<[^>]+>", "", e.get("summary", "") or "").strip()
-                published = e.get("published_parsed") or e.get("updated_parsed")
-                ts = dt.datetime(*published[:6]) if published else dt.datetime.min
-                if title:
-                    items.append({"title": title, "summary": summary[:400],
-                                  "link": e.get("link", ""), "source": url, "ts": ts})
-            log(f"RSS OK ({len(feed.entries)} entrées) : {url}")
-        except Exception as ex:
-            log(f"RSS ERREUR {url} : {ex}")
-    items.sort(key=lambda x: x["ts"], reverse=True)
+                items.append(
+                    {
+                        "title": getattr(e, "title", "").strip(),
+                        "summary": re.sub(r"<[^>]+>", "", getattr(e, "summary", ""))[:400],
+                        "link": getattr(e, "link", ""),
+                    }
+                )
+        except Exception as exc:  # une source HS ne doit pas tout casser
+            print(f"[warn] feed KO {url}: {exc}", file=sys.stderr)
     return items
 
 
-def generate_script(title, summary):
-    """Amélioration #3 : hashtags inclus dans le prompt."""
+def pick_article(items):
+    if not items:
+        raise RuntimeError("Aucun article RSS recupere (les 3 sources ont echoue).")
+    items.sort(key=lambda a: viral_score(a["title"]), reverse=True)
+    return items[0]
+
+
+def generate_script(article) -> str:
     prompt = (
-        "Tu es un créateur TikTok viral spécialisé crypto. "
-        "Crée un script de 30 secondes EN FRANÇAIS pour ce sujet : "
-        f"\"{title}\". Contexte : {summary}\n\n"
-        "Format STRICT :\n"
-        "HOOK (5 s, choc) + 2 FAITS CLÉS (20 s) + CTA (5 s).\n"
-        "Style viral, percutant, avec quelques emojis. Moins de 80 mots.\n"
-        "Termine par une ligne HASHTAGS : "
-        "#crypto #bitcoin #btc #cryptofr #actualitécrypto #blockchain"
+        "Tu es un createur TikTok crypto francophone. A partir de cette actu, "
+        "ecris un script TikTok de 30 secondes en FRANCAIS, percutant et viral.\n"
+        "Structure : un HOOK choc (1 phrase) + 2 faits cles + un CTA (abonne-toi).\n"
+        "Style parle, phrases courtes, max ~80 mots. Termine par ces hashtags : "
+        f"{HASHTAGS}\n\n"
+        f"TITRE : {article['title']}\n"
+        f"RESUME : {article['summary']}\n"
+        f"SOURCE : {article['link']}\n"
     )
     r = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
-            "anthropic-version": "2023-06-01",
             "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         },
         json={
             "model": CLAUDE_MODEL,
-            "max_tokens": 300,
+            "max_tokens": 600,
             "messages": [{"role": "user", "content": prompt}],
         },
         timeout=60,
     )
     r.raise_for_status()
     data = r.json()
-    return "".join(block.get("text", "") for block in data.get("content", [])).strip()
+    return data["content"][0]["text"].strip()
 
 
-def viral_score(script):
-    """Amélioration #2 : note 1-10 du potentiel viral."""
-    s = script.lower()
-    score = 0
-    if re.search(r"\d", script):
-        score += 3                                   # contient un chiffre / stat
-    if any(w in s for w in SHOCK_WORDS):
-        score += 2                                   # mot choc
-    word_count = len(re.findall(r"\w+", script))
-    if word_count < 80:
-        score += 2                                   # court = punchy
-    if re.search(r"[\U0001F300-\U0001FAFF☀-➿]", script):
-        score += 1                                   # emoji
-    return score
+def make_audio(script: str):
+    """Retourne (filename, bytes) ou None si pas de cle ElevenLabs / echec."""
+    if not ELEVENLABS_API_KEY:
+        return None
+    try:
+        voice = VOICE_EVEN if dt.date.today().toordinal() % 2 == 0 else VOICE_ODD
+        r = requests.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice}",
+            headers={
+                "xi-api-key": ELEVENLABS_API_KEY,
+                "content-type": "application/json",
+                "accept": "audio/mpeg",
+            },
+            json={"text": script, "model_id": "eleven_multilingual_v2"},
+            timeout=120,
+        )
+        r.raise_for_status()
+        fname = f"audio/{dt.date.today().isoformat()}.mp3"
+        return fname, r.content
+    except Exception as exc:
+        print(f"[warn] audio KO: {exc}", file=sys.stderr)
+        return None
 
 
-def pick_best_script(articles, min_score=6, max_tries=4):
-    """Génère des scripts jusqu'à atteindre un bon score viral (sinon garde le meilleur)."""
-    best = None
-    for art in articles[:max_tries]:
-        try:
-            script = generate_script(art["title"], art["summary"])
-        except Exception as ex:
-            log(f"Claude ERREUR sur '{art['title']}' : {ex}")
-            continue
-        sc = viral_score(script)
-        log(f"Script généré (score {sc}/10) ← {art['title']}")
-        if best is None or sc > best["score"]:
-            best = {"article": art, "script": script, "score": sc}
-        if sc >= min_score:
-            break
-    return best
-
-
-def tts(script, voice_id):
-    r = requests.post(
-        f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
-        headers={"xi-api-key": ELEVENLABS_API_KEY, "content-type": "application/json"},
-        json={"text": script, "model_id": "eleven_multilingual_v2"},
-        timeout=120,
-    )
+def gh_commit_file(path: str, content_bytes: bytes, message: str):
+    """Commit un fichier binaire dans le repo (pour l'audio). Best-effort."""
+    url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/{path}"
+    payload = {
+        "message": message,
+        "content": base64.b64encode(content_bytes).decode("ascii"),
+    }
+    r = requests.put(url, headers=_gh_headers(), json=payload, timeout=60)
     r.raise_for_status()
-    return r.content  # MP3 bytes
+    return r.json()["content"]["download_url"]
 
 
-def send_email(subject, body, mp3_bytes=None, mp3_name="tiktok.mp3"):
-    msg = EmailMessage()
-    msg["From"] = GMAIL_USER
-    msg["To"] = MAIL_TO
-    msg["Subject"] = subject
-    msg.set_content(body)
-    if mp3_bytes:
-        msg.add_attachment(mp3_bytes, maintype="audio", subtype="mpeg", filename=mp3_name)
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        smtp.send_message(msg)
-    log(f"Email envoyé → {MAIL_TO}")
+def gh_create_issue(title: str, body: str):
+    url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/issues"
+    r = requests.post(url, headers=_gh_headers(), json={"title": title, "body": body}, timeout=60)
+    r.raise_for_status()
+    return r.json()["html_url"]
+
+
+def _gh_headers():
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def owner_handle() -> str:
+    return GITHUB_REPOSITORY.split("/")[0] if "/" in GITHUB_REPOSITORY else ""
 
 
 # ---------------------------------------------------------------- main
 def main():
-    missing = [k for k in ("ANTHROPIC_API_KEY", "ELEVENLABS_API_KEY",
-                           "GMAIL_USER", "GMAIL_APP_PASSWORD") if not os.environ.get(k)]
-    if missing:
-        log(f"Secrets manquants : {missing}")
-        sys.exit(1)
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("Secret ANTHROPIC_API_KEY manquant.")
+    if not (GITHUB_TOKEN and GITHUB_REPOSITORY):
+        raise RuntimeError("GITHUB_TOKEN / GITHUB_REPOSITORY absents (lancer via GitHub Actions).")
 
-    articles = fetch_articles()
-    if not articles:
-        raise RuntimeError("Aucun article récupéré depuis les flux RSS.")
+    today = dt.date.today().isoformat()
+    article = pick_article(get_articles())
+    script = generate_script(article)
 
-    best = pick_best_script(articles)
-    if not best:
-        raise RuntimeError("Impossible de générer un script.")
+    audio = make_audio(script)
+    audio_line = ""
+    if audio:
+        try:
+            fname, content = audio
+            dl = gh_commit_file(fname, content, f"audio {today}")
+            audio_line = f"\n\n**Audio du jour :** {dl}"
+        except Exception as exc:
+            print(f"[warn] commit audio KO: {exc}", file=sys.stderr)
 
-    day_even = dt.date.today().day % 2 == 0
-    voice_id = VOICE_EVEN if day_even else VOICE_ODD
-    mp3 = tts(best["script"], voice_id)
-
-    art = best["article"]
-    today = dt.date.today().strftime("%d/%m/%Y")
+    mention = owner_handle()
     body = (
-        f"📈 SUIVI TIKTOK CRYPTO — {today}\n"
-        f"{'='*40}\n\n"
-        f"Score viral : {best['score']}/10\n"
-        f"Source : {art['title']}\n"
-        f"Lien : {art['link']}\n"
-        f"Voix : {'paire' if day_even else 'impaire'} ({voice_id})\n\n"
-        f"--- SCRIPT ---\n{best['script']}\n\n"
-        f"(Audio MP3 en pièce jointe.)"
+        (f"@{mention}\n\n" if mention else "")
+        + f"**Script TikTok crypto - {today}**\n\n"
+        + "```\n" + script + "\n```\n\n"
+        + f"Source : {article['title']}\n{article['link']}"
+        + audio_line
+        + "\n\n_Genere automatiquement par le bot (GitHub Actions)._"
     )
-    send_email(f"🎬 Script TikTok — {art['title'][:60]}", body, mp3, f"tiktok_{today.replace('/','-')}.mp3")
-    log("Terminé avec succès.")
+    issue_url = gh_create_issue(f"TikTok crypto - {today}", body)
+    print(f"Issue creee : {issue_url}")
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as e:  # Amélioration #5 : alerte par email si ça plante
-        log(f"ÉCHEC : {e}")
+    except Exception:
+        tb = traceback.format_exc()
+        print(tb, file=sys.stderr)
+        # Tente de remonter l'erreur par email (via une issue) si possible
         try:
-            if GMAIL_USER and GMAIL_APP_PASSWORD:
-                send_email("🚨 ALERTE — Le bot TikTok crypto a planté",
-                           f"Le workflow quotidien a échoué :\n\n{e}\n\n"
-                           f"Vérifie les logs GitHub Actions.")
-        except Exception as e2:
-            log(f"Échec de l'email d'alerte : {e2}")
+            if GITHUB_TOKEN and GITHUB_REPOSITORY:
+                m = owner_handle()
+                gh_create_issue(
+                    f"[ERREUR] Bot crypto - {dt.date.today().isoformat()}",
+                    (f"@{m}\n\n" if m else "") + "Le bot a echoue :\n\n```\n" + tb + "\n```",
+                )
+        except Exception as exc:
+            print(f"[warn] impossible de notifier l'erreur: {exc}", file=sys.stderr)
         sys.exit(1)
