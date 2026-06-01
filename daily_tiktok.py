@@ -287,6 +287,73 @@ def make_tokens(path: str):
     full.save(path)
 
 
+def fetch_markets():
+    """Top 100 cryptos (CoinGecko, gratuit) avec variation 24h + courbe 7j."""
+    url = (
+        "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd"
+        "&order=market_cap_desc&per_page=100&page=1&sparkline=true"
+        "&price_change_percentage=24h"
+    )
+    r = requests.get(url, headers={"accept": "application/json"}, timeout=30)
+    r.raise_for_status()
+    out = []
+    for x in r.json():
+        sp = (x.get("sparkline_in_7d") or {}).get("price") or []
+        sp = [p for p in sp if isinstance(p, (int, float))]
+        pc = x.get("price_change_percentage_24h")
+        if pc is None or len(sp) < 24:
+            continue
+        sym = re.sub(r"[^A-Z0-9$.+-]", "", (x.get("symbol") or "").upper())[:8] or "COIN"
+        out.append({"sym": sym, "pc": float(pc), "sp": sp})
+    return out
+
+
+def _draw_spark(d, box, prices, color):
+    x0, y0, x1, y1 = box
+    lo, hi = min(prices), max(prices)
+    rng = (hi - lo) or 1.0
+    n = len(prices)
+    pts = [(x0 + (x1 - x0) * i / (n - 1), y1 - (y1 - y0) * ((p - lo) / rng))
+           for i, p in enumerate(prices)]
+    d.line(pts, fill=color + (70,), width=16, joint="curve")
+    d.line(pts, fill=color + (255,), width=6, joint="curve")
+
+
+def make_chart(path: str, n: int = 4):
+    """Graphe REEL : top hausses (vert) + top baisses (rouge). Retourne la largeur, ou None."""
+    data = fetch_markets()
+    if len(data) < 4:
+        return None
+    data.sort(key=lambda z: z["pc"])
+    losers = data[:n]
+    gainers = list(reversed(data[-n:]))
+    from PIL import Image, ImageDraw
+
+    cw, pad, H = 660, 50, 1920
+    cols = max(len(gainers), len(losers))
+    W2 = pad * 2 + cols * cw
+    img = Image.new("RGBA", (W2, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    flbl, fpct = _font(48), _font(58)
+    green, red = (70, 225, 140), (255, 95, 95)
+
+    def band(coins, top):
+        ch = 380
+        for i, c in enumerate(coins):
+            col = green if c["pc"] >= 0 else red
+            x0 = pad + i * cw + 40
+            x1 = pad + i * cw + cw - 40
+            _draw_spark(d, (x0, top, x1, top + ch), c["sp"], col)
+            d.text((x0, top - 66), c["sym"], font=flbl, fill=(235, 240, 245, 255))
+            sign = "+" if c["pc"] >= 0 else ""
+            d.text((x0, top + ch + 14), f"{sign}{c['pc']:.1f}%", font=fpct, fill=col + (255,))
+
+    band(gainers, 360)    # bande du haut : ca monte (vert)
+    band(losers, 1170)    # bande du bas : ca chute (rouge)
+    img.save(path)
+    return W2
+
+
 # ---------------------------------------------------------------- video
 def build_video(spoken: str, out_mp4: str):
     """Video dynamique. Retourne le chemin du mp4, ou None si la voix echoue."""
@@ -302,31 +369,45 @@ def build_video(spoken: str, out_mp4: str):
     dur = audio_duration(mp3) or (len(spoken.split()) / 2.7)
     ass = "cap.ass"
     build_ass(words, dur, spoken, ass)
-    tokens = "tokens.png"
-    make_tokens(tokens)
 
     grad = (
-        f"gradients=s=1080x1920:c0=0x0F2027:c1=0x1A2F4A:c2=0x24506E:"
+        f"gradients=s=1080x1920:c0=0x0F2027:c1=0x16263F:c2=0x213F5E:"
         f"d={dur:.2f}:speed=0.012:r=30"
     )
-    # fond degrade anime + symboles crypto qui defilent en continu + sous-titres synchro
-    filt = (
-        "[1:v]format=rgba,colorchannelmixer=aa=0.28[tok];"
-        "[0:v][tok]overlay=x=0:y='-(mod(t*120,1920))':shortest=1[bg];"
-        "[bg]subtitles=" + ass + "[v]"
-    )
+
+    # Fond = vrai graphique des cryptos qui montent (vert) / chutent (rouge),
+    # qui defile horizontalement. Repli sur les symboles si la data echoue.
+    chart_w = None
+    try:
+        chart_w = make_chart("chart.png")
+    except Exception as exc:
+        print(f"[warn] chart KO: {exc}", file=sys.stderr)
+        chart_w = None
+
+    if chart_w and chart_w > 1080:
+        bg_in = ["-loop", "1", "-framerate", "30", "-t", f"{dur:.2f}", "-i", "chart.png"]
+        panx = f"-({chart_w - 1080})*t/{dur:.2f}"
+        filt = (
+            "[1:v]format=rgba,colorchannelmixer=aa=0.55[bgsrc];"
+            f"[0:v][bgsrc]overlay=x='{panx}':y=0:shortest=1[bg];"
+            "[bg]subtitles=" + ass + "[v]"
+        )
+    else:
+        make_tokens("tokens.png")
+        bg_in = ["-loop", "1", "-framerate", "30", "-t", f"{dur:.2f}", "-i", "tokens.png"]
+        filt = (
+            "[1:v]format=rgba,colorchannelmixer=aa=0.28[bgsrc];"
+            "[0:v][bgsrc]overlay=x=0:y='-(mod(t*120,1920))':shortest=1[bg];"
+            "[bg]subtitles=" + ass + "[v]"
+        )
+
     subprocess.run(
-        [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", grad,
-            "-loop", "1", "-framerate", "30", "-t", f"{dur:.2f}", "-i", tokens,
-            "-i", mp3,
-            "-filter_complex", filt,
-            "-map", "[v]", "-map", "2:a",
-            "-c:v", "libx264", "-r", "30", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
-            "-shortest", out_mp4,
-        ],
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", grad] + bg_in + ["-i", mp3,
+         "-filter_complex", filt,
+         "-map", "[v]", "-map", "2:a",
+         "-c:v", "libx264", "-r", "30", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "192k",
+         "-shortest", out_mp4],
         check=True,
     )
     return out_mp4
