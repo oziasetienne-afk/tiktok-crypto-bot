@@ -4,6 +4,19 @@ Ce dossier contient 9 competences pretes a importer dans Cowork (Claude).
 Chaque competence a son propre dossier avec un `SKILL.md`, et un ZIP correspondant
 dans `dist/` dont la **racine est le dossier de la competence** (pas de sous-dossier).
 
+## Deux usages
+
+Le depot expose les memes 9 competences de deux facons :
+
+- **Cowork (app)** — via les ZIP de `skills/dist/`. Voir "Comment installer une
+  competence dans Cowork" plus bas.
+- **Claude Code (terminal)** — les memes competences sont aussi installees en natif
+  sous `.claude/skills/<nom>/SKILL.md`. Elles deviennent invocables (ex.
+  `/briefing-matinal`) au demarrage d'une session Claude Code sur ce depot.
+
+> Les `SKILL.md` de `skills/<nom>/` et de `.claude/skills/<nom>/` sont identiques :
+> editer l'un sans l'autre cree une divergence. Garder les deux en phase.
+
 ## Les 9 competences
 
 | # | Dossier | ZIP | Connecteurs requis |
