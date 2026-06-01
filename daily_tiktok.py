@@ -298,8 +298,10 @@ def main():
         mp4 = build_video(spoken, f"{today}.mp4")
         if mp4:
             with open(mp4, "rb") as f:
-                page, dl = gh_commit_file(f"video/{today}.mp4", f.read(), f"video {today}")
-            video_block = f"🎬 **Vidéo prête à poster :** [Télécharger]({dl})\n\n_(ou ouvrir : {page})_"
+                page, _dl = gh_commit_file(f"video/{today}.mp4", f.read(), f"video {today}")
+            # Lien RAW stable (repo public) — pas de jeton qui expire
+            raw = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/video/{today}.mp4"
+            video_block = f"🎬 **Vidéo prête à poster :** [Télécharger la vidéo]({raw})\n\n_(aperçu dans le navigateur : {page})_"
     except Exception as exc:
         print(f"[warn] video KO: {exc}", file=sys.stderr)
         video_block = f"_Video KO ({exc}). Utilise le script ci-dessus._"
