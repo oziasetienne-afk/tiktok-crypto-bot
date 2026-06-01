@@ -304,7 +304,8 @@ def fetch_markets():
         if pc is None or len(sp) < 24:
             continue
         sym = re.sub(r"[^A-Z0-9$.+-]", "", (x.get("symbol") or "").upper())[:8] or "COIN"
-        out.append({"sym": sym, "pc": float(pc), "sp": sp})
+        out.append({"sym": sym, "pc": float(pc), "sp": sp,
+                    "rank": x.get("market_cap_rank") or 9999})
     return out
 
 
@@ -321,7 +322,7 @@ def _draw_spark(d, box, prices, color):
 
 def make_chart(path: str, n: int = 4):
     """Graphe REEL : top hausses (vert) + top baisses (rouge). Retourne la largeur, ou None."""
-    data = fetch_markets()
+    data = [d for d in fetch_markets() if d["rank"] <= 40]
     if len(data) < 4:
         return None
     data.sort(key=lambda z: z["pc"])
