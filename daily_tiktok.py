@@ -182,6 +182,60 @@ def audio_duration(path: str) -> float:
         return 0.0
 
 
+def transcribe_words(mp3_path: str):
+    """faster-whisper : timing REEL de chaque mot prononce. Retourne [(start,end,mot)] ou None."""
+    try:
+        from faster_whisper import WhisperModel
+        model = WhisperModel("base", device="cpu", compute_type="int8")
+        segments, _ = model.transcribe(mp3_path, language="fr", word_timestamps=True)
+        out = []
+        for s in segments:
+            for w in (s.words or []):
+                t = (w.word or "").strip()
+                if t:
+                    out.append((float(w.start), float(w.end), t))
+        return out or None
+    except Exception as exc:
+        print(f"[warn] whisper KO: {exc}", file=sys.stderr)
+        return None
+
+
+def _norm_word(s: str) -> str:
+    return re.sub(r"[^0-9a-zàâäéèêëïîôöùûüç%$]", "", s.lower())
+
+
+def align_words(spoken: str, ww):
+    """Cale les mots EXACTS du script sur les timings reels (Whisper). -> [(start,end,mot)] ou None."""
+    import difflib
+    disp = [w for w in spoken.split() if w.strip()]
+    if not disp or not ww:
+        return None
+    dk = [_norm_word(x) for x in disp]
+    wk = [_norm_word(x[2]) for x in ww]
+    st = [None] * len(disp)
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=dk, b=wk, autojunk=False).get_opcodes():
+        if tag == "equal":
+            for k in range(i2 - i1):
+                st[i1 + k] = ww[j1 + k][0]
+    known = [i for i in range(len(disp)) if st[i] is not None]
+    if len(known) < max(2, len(disp) // 4):
+        return None  # trop peu d'ancres -> on laisse le fallback
+    first, last = known[0], known[-1]
+    for i in range(first):
+        st[i] = st[first]
+    for i in range(last + 1, len(disp)):
+        st[i] = st[last]
+    for a, b in zip(known, known[1:]):
+        for i in range(a + 1, b):
+            st[i] = st[a] + (st[b] - st[a]) * (i - a) / (b - a)
+    units = []
+    for i, w in enumerate(disp):
+        s = st[i]
+        e = st[i + 1] if i + 1 < len(disp) else s + 0.4
+        units.append([s, e if e > s else s + 0.18, w])
+    return units
+
+
 # ---------------------------------------------------------------- sous-titres ASS
 def _ass_ts(t: float) -> str:
     if t < 0:
@@ -218,7 +272,7 @@ def chunks_from_segments(segs, total_dur, spoken):
     return chunks
 
 
-def build_ass(words, total_dur, spoken, ass_path):
+def build_ass(units, total_dur, ass_path):
     end_all = _ass_ts(total_dur)
     header = (
         "[Script Info]\n"
@@ -228,8 +282,8 @@ def build_ass(words, total_dur, spoken, ass_path):
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
         "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        "Style: Cap,DejaVu Sans,96,&H00FFFFFF,&H000F6FFF,&H00101010,&H64000000,-1,0,0,0,"
-        "100,100,0,0,1,7,3,5,90,90,0,1\n"
+        "Style: Cap,DejaVu Sans,112,&H00FFFFFF,&H000F6FFF,&H00101010,&H64000000,-1,0,0,0,"
+        "100,100,0,0,1,8,4,5,80,80,0,1\n"
         "Style: Lab,DejaVu Sans,52,&H00FFE6B0,&H000000FF,&H00101010,&H64000000,-1,0,0,0,"
         "100,100,2,0,1,5,2,8,60,60,120,1\n"
         "Style: Tag,DejaVu Sans,46,&H005A9CFF,&H000000FF,&H00101010,&H64000000,-1,0,0,0,"
@@ -237,15 +291,17 @@ def build_ass(words, total_dur, spoken, ass_path):
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
-    pop = (r"{\fad(60,40)\fscx72\fscy72\t(0,130,\fscx112\fscy112)"
-           r"\t(130,230,\fscx100\fscy100)}")
+    pop = (r"{\fad(40,30)\fscx66\fscy66\t(0,100,\fscx120\fscy120)"
+           r"\t(100,190,\fscx100\fscy100)}")
+    accent = r"{\1c&H3FD2FF&}"   # or/jaune : met en avant chiffres, %, $
     lines = [
         f"Dialogue: 0,0:00:00.00,{end_all},Lab,,0,0,0,,{TOP_LABEL}",
         f"Dialogue: 0,0:00:00.00,{end_all},Tag,,0,0,0,,{HANDLE}",
     ]
-    for start, end, txt in chunks_from_segments(words, total_dur, spoken):
+    for start, end, txt in units:
+        col = accent if re.search(r"[0-9%$€]", txt) else ""
         lines.append(
-            f"Dialogue: 1,{_ass_ts(start)},{_ass_ts(end)},Cap,,0,0,0,,{pop}{_ass_safe(txt)}"
+            f"Dialogue: 1,{_ass_ts(start)},{_ass_ts(end)},Cap,,0,0,0,,{pop}{col}{_ass_safe(txt)}"
         )
     with open(ass_path, "w", encoding="utf-8") as f:
         f.write(header + "\n".join(lines) + "\n")
@@ -369,7 +425,14 @@ def build_video(spoken: str, out_mp4: str):
 
     dur = audio_duration(mp3) or (len(spoken.split()) / 2.7)
     ass = "cap.ass"
-    build_ass(words, dur, spoken, ass)
+    # Sous-titres cales sur le timing REEL de la voix (Whisper) + mots EXACTS du script.
+    units = None
+    ww = transcribe_words(mp3)
+    if ww:
+        units = align_words(spoken, ww)
+    if not units:
+        units = chunks_from_segments(words, dur, spoken)
+    build_ass(units, dur, ass)
 
     grad = (
         f"gradients=s=1080x1920:c0=0x0F2027:c1=0x16263F:c2=0x213F5E:"
