@@ -48,7 +48,7 @@ RSS_FEEDS = [
 ]
 
 HASHTAGS = "#crypto #bitcoin #btc #cryptofr #actualitécrypto #blockchain"
-HANDLE = "@legendarymoments000"
+HANDLE = "@don.sodialia"
 TOP_LABEL = "ACTU CRYPTO"
 
 # Voix edge-tts (gratuites) alternees jour pair / impair
@@ -251,6 +251,42 @@ def build_ass(words, total_dur, spoken, ass_path):
         f.write(header + "\n".join(lines) + "\n")
 
 
+# ---------------------------------------------------------------- visuel (fond anime)
+def _font(size: int):
+    from PIL import ImageFont
+    try:
+        return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def make_tokens(path: str):
+    """Pattern de symboles crypto (transparent), hauteur double => defilement sans couture."""
+    import random
+    from PIL import Image, ImageDraw
+
+    W, Hb = 1080, 1920
+    block = Image.new("RGBA", (W, Hb), (0, 0, 0, 0))
+    d = ImageDraw.Draw(block)
+    font = _font(60)
+    tokens = ["BTC", "ETH", "SOL", "XRP", "BNB", "$", "+5%", "-3%", "$68K",
+              "1 BTC", "ATH", "HODL", "▲", "▼"]
+    palette = [(90, 200, 255, 255), (120, 230, 170, 255),
+               (255, 180, 90, 255), (190, 205, 235, 255)]
+    random.seed(7)
+    cols, rows = 4, 6
+    cw, chh = W / cols, Hb / rows
+    for r in range(rows):
+        for c in range(cols):
+            x = int(c * cw + random.uniform(8, 40))
+            y = int(r * chh + random.uniform(8, 40))
+            d.text((x, y), random.choice(tokens), font=font, fill=random.choice(palette))
+    full = Image.new("RGBA", (W, Hb * 2), (0, 0, 0, 0))
+    full.paste(block, (0, 0))
+    full.paste(block, (0, Hb))
+    full.save(path)
+
+
 # ---------------------------------------------------------------- video
 def build_video(spoken: str, out_mp4: str):
     """Video dynamique. Retourne le chemin du mp4, ou None si la voix echoue."""
@@ -266,18 +302,27 @@ def build_video(spoken: str, out_mp4: str):
     dur = audio_duration(mp3) or (len(spoken.split()) / 2.7)
     ass = "cap.ass"
     build_ass(words, dur, spoken, ass)
+    tokens = "tokens.png"
+    make_tokens(tokens)
 
     grad = (
-        f"gradients=s=1080x1920:c0=0x0F2027:c1=0x203A56:c2=0x2C5364:"
+        f"gradients=s=1080x1920:c0=0x0F2027:c1=0x1A2F4A:c2=0x24506E:"
         f"d={dur:.2f}:speed=0.012:r=30"
+    )
+    # fond degrade anime + symboles crypto qui defilent en continu + sous-titres synchro
+    filt = (
+        "[1:v]format=rgba,colorchannelmixer=aa=0.28[tok];"
+        "[0:v][tok]overlay=x=0:y='-(mod(t*120,1920))':shortest=1[bg];"
+        "[bg]subtitles=" + ass + "[v]"
     )
     subprocess.run(
         [
             "ffmpeg", "-y",
             "-f", "lavfi", "-i", grad,
+            "-loop", "1", "-framerate", "30", "-t", f"{dur:.2f}", "-i", tokens,
             "-i", mp3,
-            "-filter_complex", f"[0:v]subtitles={ass}[v]",
-            "-map", "[v]", "-map", "1:a",
+            "-filter_complex", filt,
+            "-map", "[v]", "-map", "2:a",
             "-c:v", "libx264", "-r", "30", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             "-shortest", out_mp4,
