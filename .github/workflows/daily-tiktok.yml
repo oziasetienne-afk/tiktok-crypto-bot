@@ -8,7 +8,7 @@ on:
 
 permissions:
   models: read      # inference gratuite via GitHub Models (le GITHUB_TOKEN suffit)
-  contents: write   # pour committer l'audio MP3 (optionnel)
+  contents: write   # pour committer la vidéo dans le repo
   issues: write     # pour ouvrir l'Issue qui t'envoie l'email
 
 jobs:
@@ -17,6 +17,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: System deps (ffmpeg + police)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -29,5 +32,4 @@ jobs:
       - name: Run daily TikTok bot
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
         run: python daily_tiktok.py
