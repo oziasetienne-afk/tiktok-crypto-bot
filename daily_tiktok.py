@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Daily TikTok Crypto — bot gratuit & perenne (GitHub Actions).
+Daily TikTok Crypto — bot 100% gratuit & perenne (GitHub Actions).
 
 Chaque jour :
   RSS crypto (CoinDesk + CryptoNews + Decrypt)
   -> choix de l'article le plus "viral"
-  -> script TikTok FR (Claude Haiku, avec hashtags)
+  -> script TikTok FR genere par GitHub Models (gratuit, via le GITHUB_TOKEN)
   -> (optionnel) voix ElevenLabs alternee, commitee dans le repo
   -> LIVRAISON : ouverture d'une Issue GitHub avec le script
      + @mention du proprietaire  ==>  GitHub t'envoie un EMAIL automatiquement.
 
-Aucun mot de passe Gmail requis : on utilise le GITHUB_TOKEN fourni par Actions.
+AUCUNE cle API a fournir : tout tourne avec le GITHUB_TOKEN fourni par Actions.
+(Le workflow doit avoir  permissions: models: read, issues: write, contents: write)
 
-Secrets requis :
-  ANTHROPIC_API_KEY   (obligatoire)
 Secrets optionnels :
   ELEVENLABS_API_KEY  (si present -> ajoute l'audio MP3)
 Variables fournies AUTOMATIQUEMENT par GitHub Actions :
@@ -32,12 +31,14 @@ import feedparser
 import requests
 
 # ---------------------------------------------------------------- config
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "").strip()
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "").strip()  # "owner/repo"
 
-CLAUDE_MODEL = "claude-haiku-4-5-20251001"
+# GitHub Models — inference gratuite via le GITHUB_TOKEN
+GH_MODELS_URL = "https://models.github.ai/inference/chat/completions"
+GH_MODEL = "openai/gpt-4.1"
+GH_API_VERSION = "2026-03-10"
 
 RSS_FEEDS = [
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -100,8 +101,8 @@ def pick_article(items):
 
 def generate_script(article) -> str:
     prompt = (
-        "Tu es un createur TikTok crypto francophone. A partir de cette actu, "
-        "ecris un script TikTok de 30 secondes en FRANCAIS, percutant et viral.\n"
+        "A partir de cette actu crypto, ecris un script TikTok de 30 secondes en "
+        "FRANCAIS, percutant et viral.\n"
         "Structure : un HOOK choc (1 phrase) + 2 faits cles + un CTA (abonne-toi).\n"
         "Style parle, phrases courtes, max ~80 mots. Termine par ces hashtags : "
         f"{HASHTAGS}\n\n"
@@ -110,22 +111,26 @@ def generate_script(article) -> str:
         f"SOURCE : {article['link']}\n"
     )
     r = requests.post(
-        "https://api.anthropic.com/v1/messages",
+        GH_MODELS_URL,
         headers={
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-GitHub-Api-Version": GH_API_VERSION,
         },
         json={
-            "model": CLAUDE_MODEL,
+            "model": GH_MODEL,
+            "messages": [
+                {"role": "system", "content": "Tu es un createur TikTok crypto francophone."},
+                {"role": "user", "content": prompt},
+            ],
             "max_tokens": 600,
-            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.8,
         },
-        timeout=60,
+        timeout=90,
     )
     r.raise_for_status()
-    data = r.json()
-    return data["content"][0]["text"].strip()
+    return r.json()["choices"][0]["message"]["content"].strip()
 
 
 def make_audio(script: str):
@@ -185,8 +190,6 @@ def owner_handle() -> str:
 
 # ---------------------------------------------------------------- main
 def main():
-    if not ANTHROPIC_API_KEY:
-        raise RuntimeError("Secret ANTHROPIC_API_KEY manquant.")
     if not (GITHUB_TOKEN and GITHUB_REPOSITORY):
         raise RuntimeError("GITHUB_TOKEN / GITHUB_REPOSITORY absents (lancer via GitHub Actions).")
 
@@ -211,7 +214,7 @@ def main():
         + "```\n" + script + "\n```\n\n"
         + f"Source : {article['title']}\n{article['link']}"
         + audio_line
-        + "\n\n_Genere automatiquement par le bot (GitHub Actions)._"
+        + "\n\n_Genere automatiquement par le bot (GitHub Actions + GitHub Models)._"
     )
     issue_url = gh_create_issue(f"TikTok crypto - {today}", body)
     print(f"Issue creee : {issue_url}")
