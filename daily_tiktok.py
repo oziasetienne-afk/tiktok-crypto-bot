@@ -7,17 +7,18 @@ Chaque jour :
   RSS crypto (CoinDesk + CryptoNews + Decrypt)
   -> article le plus "viral"
   -> script TikTok FR (GitHub Models, gratuit via le GITHUB_TOKEN)
-  -> VOIX OFF FR gratuite (edge-tts) + VISUEL (Pillow) + VIDEO verticale (ffmpeg)
-  -> video commitee dans le repo (dossier video/)
-  -> Issue GitHub avec le script (= legende a copier) + lien de la video
-     + @mention du proprietaire  ==>  GitHub t'envoie un EMAIL.
+  -> VOIX OFF FR gratuite (edge-tts) AVEC timings mot-a-mot
+  -> VIDEO verticale DYNAMIQUE (ffmpeg) : fond degrade anime (gradients)
+     + sous-titres animes synchronises a la voix (style TikTok, libass)
+  -> video commitee dans video/<date>.mp4
+  -> Issue GitHub : lien de telechargement (RAW stable) + legende a copier
+     + @mention du proprietaire  ==>  EMAIL automatique.
 
-Tu telecharges la video et tu la postes toi-meme sur TikTok (10 s) :
-  -> 0 EUR, rien qui expire, et AUCUN risque de ban (c'est toi qui postes).
+Tu telecharges la video et tu la postes toi-meme (10 s) : 0 EUR, pas de ban.
 
-AUCUNE cle API a fournir : tout tourne avec le GITHUB_TOKEN d'Actions.
+AUCUNE cle API : tout tourne avec le GITHUB_TOKEN d'Actions.
 (Workflow : permissions models:read, issues:write, contents:write
- + apt: ffmpeg, fonts-dejavu-core ; pip: edge-tts, Pillow)
+ + apt: ffmpeg fonts-dejavu-core ; pip: edge-tts)
 """
 
 import asyncio
@@ -48,12 +49,11 @@ RSS_FEEDS = [
 
 HASHTAGS = "#crypto #bitcoin #btc #cryptofr #actualitécrypto #blockchain"
 HANDLE = "@legendarymoments000"
+TOP_LABEL = "ACTU CRYPTO"
 
 # Voix edge-tts (gratuites) alternees jour pair / impair
 VOICE_EVEN = "fr-FR-DeniseNeural"
 VOICE_ODD = "fr-FR-HenriNeural"
-
-FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 SHOCK_WORDS = [
     "krach", "explose", "record", "chute", "alerte", "arnaque", "piratage",
@@ -62,7 +62,7 @@ SHOCK_WORDS = [
 ]
 
 
-# ---------------------------------------------------------------- helpers texte
+# ---------------------------------------------------------------- texte
 def viral_score(text: str) -> int:
     t = (text or "").lower()
     score = 0
@@ -138,116 +138,149 @@ def generate_script(article) -> str:
 
 
 def split_script(script: str):
-    """Retourne (texte_a_dire_et_afficher, legende_complete)."""
+    """Retourne (texte_a_dire, legende_complete). Le texte dit exclut la ligne de hashtags."""
     lines = [ln.strip() for ln in script.splitlines() if ln.strip()]
     spoken = [ln for ln in lines if not ln.lstrip().startswith("#")]
-    spoken_text = "\n".join(spoken).strip()
-    return spoken_text, script.strip()
+    return " ".join(spoken).strip(), script.strip()
 
 
-# ---------------------------------------------------------------- voix (edge-tts)
-def make_voice(text: str, out_mp3: str) -> bool:
+# ---------------------------------------------------------------- voix + timings
+def synthesize(text: str, mp3_path: str):
+    """edge-tts : ecrit le mp3 et renvoie [(start_s, end_s, mot), ...]."""
+    import edge_tts
+
+    voice = VOICE_EVEN if dt.date.today().toordinal() % 2 == 0 else VOICE_ODD
+    words = []
+
+    async def _run():
+        comm = edge_tts.Communicate(text, voice)
+        with open(mp3_path, "wb") as f:
+            async for ch in comm.stream():
+                t = ch.get("type")
+                if t == "audio" and ch.get("data"):
+                    f.write(ch["data"])
+                elif t in ("WordBoundary", "SentenceBoundary"):
+                    off = float(ch.get("offset", 0)) / 1e7
+                    dur = float(ch.get("duration", 0)) / 1e7
+                    w = (ch.get("text") or "").strip()
+                    if w:
+                        words.append((off, off + dur, w))
+
+    asyncio.run(_run())
+    return words
+
+
+def audio_duration(path: str) -> float:
     try:
-        import edge_tts
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, check=True,
+        )
+        return float(out.stdout.strip())
+    except Exception:
+        return 0.0
 
-        voice = VOICE_EVEN if dt.date.today().toordinal() % 2 == 0 else VOICE_ODD
 
-        async def _run():
-            await edge_tts.Communicate(text, voice).save(out_mp3)
+# ---------------------------------------------------------------- sous-titres ASS
+def _ass_ts(t: float) -> str:
+    if t < 0:
+        t = 0.0
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = t % 60
+    return f"{h:d}:{m:02d}:{s:05.2f}"
 
-        asyncio.run(_run())
-        return os.path.getsize(out_mp3) > 1000
+
+def _ass_safe(txt: str) -> str:
+    return txt.replace("{", "(").replace("}", ")").replace("\\", "/").replace("\n", " ").strip()
+
+
+def chunks_from_segments(segs, total_dur, spoken):
+    """Decoupe chaque segment (mot OU phrase) en blocs de <=3 mots, repartis
+    dans la fenetre temporelle du segment. Fallback : split regulier global."""
+    chunks = []
+    if segs:
+        for s, e, txt in segs:
+            toks = txt.split()
+            groups = [toks[i:i + 3] for i in range(0, len(toks), 3)] or [toks]
+            span = max(0.01, (e - s) / len(groups))
+            for idx, g in enumerate(groups):
+                chunks.append([s + idx * span, s + (idx + 1) * span, " ".join(g)])
+        if chunks:
+            chunks[-1][1] = max(chunks[-1][1], total_dur - 0.05)
+    else:
+        toks = spoken.split()
+        groups = [toks[i:i + 3] for i in range(0, len(toks), 3)] or [toks]
+        dur = (total_dur or len(groups)) / max(1, len(groups))
+        for idx, g in enumerate(groups):
+            chunks.append([idx * dur, (idx + 1) * dur, " ".join(g)])
+    return chunks
+
+
+def build_ass(words, total_dur, spoken, ass_path):
+    end_all = _ass_ts(total_dur)
+    header = (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 0\n"
+        "ScaledBorderAndShadow: yes\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+        "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+        "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Cap,DejaVu Sans,96,&H00FFFFFF,&H000F6FFF,&H00101010,&H64000000,-1,0,0,0,"
+        "100,100,0,0,1,7,3,5,90,90,0,1\n"
+        "Style: Lab,DejaVu Sans,52,&H00FFE6B0,&H000000FF,&H00101010,&H64000000,-1,0,0,0,"
+        "100,100,2,0,1,5,2,8,60,60,120,1\n"
+        "Style: Tag,DejaVu Sans,46,&H005A9CFF,&H000000FF,&H00101010,&H64000000,-1,0,0,0,"
+        "100,100,0,0,1,4,2,2,60,60,90,1\n\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+    pop = (r"{\fad(60,40)\fscx72\fscy72\t(0,130,\fscx112\fscy112)"
+           r"\t(130,230,\fscx100\fscy100)}")
+    lines = [
+        f"Dialogue: 0,0:00:00.00,{end_all},Lab,,0,0,0,,{TOP_LABEL}",
+        f"Dialogue: 0,0:00:00.00,{end_all},Tag,,0,0,0,,{HANDLE}",
+    ]
+    for start, end, txt in chunks_from_segments(words, total_dur, spoken):
+        lines.append(
+            f"Dialogue: 1,{_ass_ts(start)},{_ass_ts(end)},Cap,,0,0,0,,{pop}{_ass_safe(txt)}"
+        )
+    with open(ass_path, "w", encoding="utf-8") as f:
+        f.write(header + "\n".join(lines) + "\n")
+
+
+# ---------------------------------------------------------------- video
+def build_video(spoken: str, out_mp4: str):
+    """Video dynamique. Retourne le chemin du mp4, ou None si la voix echoue."""
+    mp3 = "voice.mp3"
+    try:
+        words = synthesize(spoken, mp3)
     except Exception as exc:
         print(f"[warn] voix KO: {exc}", file=sys.stderr)
-        return False
-
-
-# ---------------------------------------------------------------- visuel (Pillow)
-def _font(size: int):
-    from PIL import ImageFont
-
-    try:
-        return ImageFont.truetype(FONT_BOLD, size)
-    except Exception:
-        return ImageFont.load_default()
-
-
-def _wrap(draw, text, font, max_w):
-    out = []
-    for para in text.split("\n"):
-        words = para.split()
-        cur = ""
-        for w in words:
-            t = (cur + " " + w).strip()
-            if draw.textlength(t, font=font) <= max_w or not cur:
-                cur = t
-            else:
-                out.append(cur)
-                cur = w
-        out.append(cur)
-    return out
-
-
-def make_background(spoken_text: str, out_png: str):
-    from PIL import Image, ImageDraw
-
-    W, H = 1080, 1920
-    top, bot = (15, 32, 39), (32, 58, 86)
-    grad = Image.new("RGB", (1, H))
-    for y in range(H):
-        f = y / H
-        grad.putpixel(
-            (0, y),
-            (
-                int(top[0] + (bot[0] - top[0]) * f),
-                int(top[1] + (bot[1] - top[1]) * f),
-                int(top[2] + (bot[2] - top[2]) * f),
-            ),
-        )
-    img = grad.resize((W, H))
-    d = ImageDraw.Draw(img)
-    margin = 90
-    max_w = W - 2 * margin
-
-    parts = [p for p in spoken_text.split("\n") if p.strip()]
-    hook = parts[0] if parts else spoken_text
-    body = "\n".join(parts[1:]) if len(parts) > 1 else ""
-
-    f_hook = _font(66)
-    f_body = _font(46)
-    f_foot = _font(40)
-
-    y = 180
-    for line in _wrap(d, hook, f_hook, max_w):
-        d.text((margin, y), line, font=f_hook, fill=(255, 255, 255))
-        y += 78
-    y += 40
-    for line in _wrap(d, body, f_body, max_w):
-        d.text((margin, y), line, font=f_body, fill=(220, 230, 235))
-        y += 60
-
-    d.text((margin, H - 130), HANDLE, font=f_foot, fill=(120, 200, 255))
-    img.save(out_png)
-
-
-def build_video(spoken_text: str, out_mp4: str):
-    """Construit la video. Retourne le chemin du mp4, ou None si echec voix."""
-    mp3 = "voice.mp3"
-    if not make_voice(spoken_text, mp3):
         return None
-    bg = "bg.png"
-    make_background(spoken_text, bg)
+    if not (os.path.exists(mp3) and os.path.getsize(mp3) > 1000):
+        return None
+
+    dur = audio_duration(mp3) or (len(spoken.split()) / 2.7)
+    ass = "cap.ass"
+    build_ass(words, dur, spoken, ass)
+
+    grad = (
+        f"gradients=s=1080x1920:c0=0x0F2027:c1=0x203A56:c2=0x2C5364:"
+        f"d={dur:.2f}:speed=0.012:r=30"
+    )
     subprocess.run(
         [
             "ffmpeg", "-y",
-            "-loop", "1", "-i", bg,
+            "-f", "lavfi", "-i", grad,
             "-i", mp3,
-            "-c:v", "libx264", "-tune", "stillimage", "-r", "30",
+            "-filter_complex", f"[0:v]subtitles={ass}[v]",
+            "-map", "[v]", "-map", "1:a",
+            "-c:v", "libx264", "-r", "30", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
-            "-pix_fmt", "yuv420p",
-            "-vf", "scale=1080:1920",
-            "-shortest",
-            out_mp4,
+            "-shortest", out_mp4,
         ],
         check=True,
     )
@@ -266,10 +299,13 @@ def _gh_headers():
 def gh_commit_file(path: str, content_bytes: bytes, message: str):
     url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/{path}"
     payload = {"message": message, "content": base64.b64encode(content_bytes).decode("ascii")}
+    # Si le fichier existe deja (re-run le meme jour), il faut fournir son sha.
+    g = requests.get(url, headers=_gh_headers(), params={"ref": "main"}, timeout=30)
+    if g.status_code == 200:
+        payload["sha"] = g.json().get("sha")
     r = requests.put(url, headers=_gh_headers(), json=payload, timeout=120)
     r.raise_for_status()
-    j = r.json()
-    return j["content"]["html_url"], j["content"]["download_url"]
+    return r.json()["content"]["html_url"]
 
 
 def gh_create_issue(title: str, body: str):
@@ -298,10 +334,12 @@ def main():
         mp4 = build_video(spoken, f"{today}.mp4")
         if mp4:
             with open(mp4, "rb") as f:
-                page, _dl = gh_commit_file(f"video/{today}.mp4", f.read(), f"video {today}")
-            # Lien RAW stable (repo public) — pas de jeton qui expire
+                page = gh_commit_file(f"video/{today}.mp4", f.read(), f"video {today}")
             raw = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/video/{today}.mp4"
-            video_block = f"🎬 **Vidéo prête à poster :** [Télécharger la vidéo]({raw})\n\n_(aperçu dans le navigateur : {page})_"
+            video_block = (
+                f"🎬 **Vidéo prête à poster :** [Télécharger la vidéo]({raw})\n\n"
+                f"_(aperçu dans le navigateur : {page})_"
+            )
     except Exception as exc:
         print(f"[warn] video KO: {exc}", file=sys.stderr)
         video_block = f"_Video KO ({exc}). Utilise le script ci-dessus._"
