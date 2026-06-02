@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import traceback
 
 import feedparser
@@ -62,6 +63,21 @@ SHOCK_WORDS = [
 ]
 
 
+# ---------------------------------------------------------------- utilitaires
+def retry(fn, tries: int = 3, base: float = 2.0, label: str = ""):
+    """Rejoue fn() avec backoff exponentiel (2s, 4s, 8s...). Releve la derniere erreur."""
+    for i in range(tries):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - on veut tout retenter
+            if i == tries - 1:
+                raise
+            wait = base * (2 ** i)
+            print(f"[warn] {label or 'operation'} echec {i + 1}/{tries}: {exc}"
+                  f" -> retry dans {wait:.0f}s", file=sys.stderr)
+            time.sleep(wait)
+
+
 # ---------------------------------------------------------------- texte
 def viral_score(text: str) -> int:
     t = (text or "").lower()
@@ -77,15 +93,26 @@ def viral_score(text: str) -> int:
     return score
 
 
+def _title_key(title: str) -> str:
+    """Cle de deduplication : titre normalise (minuscule, sans ponctuation, espaces compactes)."""
+    cleaned = re.sub(r"[^0-9a-zàâäéèêëïîôöùûüç ]", " ", (title or "").lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def get_articles():
-    items = []
+    items, seen = [], set()
     for url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
             for e in feed.entries[:10]:
+                title = getattr(e, "title", "").strip()
+                key = _title_key(title)
+                if not key or key in seen:  # vide ou doublon entre flux -> on saute
+                    continue
+                seen.add(key)
                 items.append(
                     {
-                        "title": getattr(e, "title", "").strip(),
+                        "title": title,
                         "summary": re.sub(r"<[^>]+>", "", getattr(e, "summary", ""))[:400],
                         "link": getattr(e, "link", ""),
                     }
@@ -95,10 +122,21 @@ def get_articles():
     return items
 
 
+def article_score(a) -> int:
+    """Score viral du titre, complete par les signaux forts du resume."""
+    score = viral_score(a["title"])
+    summ = (a.get("summary") or "").lower()
+    if any(w in summ for w in SHOCK_WORDS):
+        score += 1
+    if re.search(r"\d", summ):
+        score += 1
+    return score
+
+
 def pick_article(items):
     if not items:
         raise RuntimeError("Aucun article RSS recupere (les 3 sources ont echoue).")
-    items.sort(key=lambda a: viral_score(a["title"]), reverse=True)
+    items.sort(key=article_score, reverse=True)
     return items[0]
 
 
@@ -114,27 +152,31 @@ def generate_script(article) -> str:
         f"RESUME : {article['summary']}\n"
         f"SOURCE : {article['link']}\n"
     )
-    r = requests.post(
-        GH_MODELS_URL,
-        headers={
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "X-GitHub-Api-Version": GH_API_VERSION,
-        },
-        json={
-            "model": GH_MODEL,
-            "messages": [
-                {"role": "system", "content": "Tu es un createur TikTok crypto francophone."},
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": 600,
-            "temperature": 0.8,
-        },
-        timeout=90,
-    )
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"].strip()
+    def _call():
+        r = requests.post(
+            GH_MODELS_URL,
+            headers={
+                "Authorization": f"Bearer {GITHUB_TOKEN}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-GitHub-Api-Version": GH_API_VERSION,
+            },
+            json={
+                "model": GH_MODEL,
+                "messages": [
+                    {"role": "system",
+                     "content": "Tu es un createur TikTok crypto francophone."},
+                    {"role": "user", "content": prompt},
+                ],
+                "max_tokens": 600,
+                "temperature": 0.8,
+            },
+            timeout=90,
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
+
+    return retry(_call, label="GitHub Models")
 
 
 def split_script(script: str):
@@ -350,10 +392,13 @@ def fetch_markets():
         "&order=market_cap_desc&per_page=100&page=1&sparkline=true"
         "&price_change_percentage=24h"
     )
-    r = requests.get(url, headers={"accept": "application/json"}, timeout=30)
-    r.raise_for_status()
+    def _call():
+        r = requests.get(url, headers={"accept": "application/json"}, timeout=30)
+        r.raise_for_status()
+        return r.json()
+
     out = []
-    for x in r.json():
+    for x in retry(_call, label="CoinGecko"):
         sp = (x.get("sparkline_in_7d") or {}).get("price") or []
         sp = [p for p in sp if isinstance(p, (int, float))]
         pc = x.get("price_change_percentage_24h")
