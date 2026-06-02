@@ -14,7 +14,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         working-directory: WarframeMarketCompanion
@@ -23,8 +23,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select latest stable Xcode
-        run: sudo xcode-select -switch /Applications/Xcode.app
+      - name: Select newest installed Xcode
+        run: |
+          # XcodeGen emits a recent project format, so use the newest Xcode
+          # available on the runner to read it.
+          NEWEST="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          NEWEST="${NEWEST:-/Applications/Xcode.app}"
+          echo "Using $NEWEST"
+          sudo xcode-select -switch "$NEWEST"
+          xcodebuild -version
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -34,18 +41,6 @@ jobs:
 
       - name: Build (unsigned, for device)
         run: |
-          set -o pipefail
-          xcodebuild \
-            -project WarframeCompanion.xcodeproj \
-            -scheme WarframeCompanion \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath build \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            ONLY_ACTIVE_ARCH=NO \
-            build | xcpretty || \
           xcodebuild \
             -project WarframeCompanion.xcodeproj \
             -scheme WarframeCompanion \
