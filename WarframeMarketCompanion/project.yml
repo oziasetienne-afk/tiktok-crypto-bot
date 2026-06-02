@@ -24,3 +24,13 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+
+schemes:
+  WarframeCompanion:
+    build:
+      targets:
+        WarframeCompanion: all
+    run:
+      config: Debug
+    archive:
+      config: Release

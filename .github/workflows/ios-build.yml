@@ -1,0 +1,82 @@
+name: Build iOS app (unsigned IPA)
+
+# Click "Run workflow" in the Actions tab to build, or it runs on every push
+# that touches the app. Produces a downloadable, UNSIGNED .ipa artifact that
+# you sign with your own Apple ID using Sideloadly / AltStore.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/warframe-riven-pricing-KCR6p
+    paths:
+      - "WarframeMarketCompanion/**"
+      - ".github/workflows/ios-build.yml"
+
+jobs:
+  build:
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: WarframeMarketCompanion
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        run: sudo xcode-select -switch /Applications/Xcode.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned, for device)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project WarframeCompanion.xcodeproj \
+            -scheme WarframeCompanion \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            build | xcpretty || \
+          xcodebuild \
+            -project WarframeCompanion.xcodeproj \
+            -scheme WarframeCompanion \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          set -e
+          APP_PATH="$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -n 1)"
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No .app product found"; exit 1
+          fi
+          echo "Found app: $APP_PATH"
+          rm -rf Payload WarframeCompanion.ipa
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -r -y WarframeCompanion-unsigned.ipa Payload >/dev/null
+          echo "Created WarframeCompanion-unsigned.ipa"
+          ls -lh WarframeCompanion-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WarframeCompanion-unsigned-ipa
+          path: WarframeMarketCompanion/WarframeCompanion-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
