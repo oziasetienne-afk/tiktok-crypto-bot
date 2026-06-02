@@ -62,6 +62,17 @@ SHOCK_WORDS = [
     "effondrement", "historique", "urgent",
 ]
 
+# Styles d'accroche tournes chaque jour (evite des hooks repetitifs d'une video a l'autre).
+HOOK_STYLES = [
+    "une QUESTION directe qui interpelle (ex: 'Tu savais que...?')",
+    "une STATISTIQUE choc balancee d'entree (un chiffre fort en premier)",
+    "une AFFIRMATION clivante qui fait reagir",
+    "un compte a rebours / une URGENCE ('Avant ce soir...')",
+    "une mise en garde ('Arrete de faire ca avec ton...')",
+    "un secret/coulisse ('Personne n'en parle, mais...')",
+    "une comparaison surprenante ('C'est comme si...')",
+]
+
 
 # ---------------------------------------------------------------- utilitaires
 def retry(fn, tries: int = 3, base: float = 2.0, label: str = ""):
@@ -141,10 +152,13 @@ def pick_article(items):
 
 
 def generate_script(article) -> str:
+    # Le style du hook tourne selon le jour pour varier l'accroche d'une video a l'autre.
+    hook_style = HOOK_STYLES[dt.date.today().toordinal() % len(HOOK_STYLES)]
     prompt = (
         "A partir de cette actu crypto, ecris un script TikTok de 30 secondes en "
         "FRANCAIS, percutant et viral.\n"
-        "Structure : un HOOK choc (1 phrase) + 2 faits cles + un CTA (abonne-toi).\n"
+        f"Le HOOK (1re phrase) doit etre : {hook_style}.\n"
+        "Structure : ce HOOK + 2 faits cles + un CTA (abonne-toi).\n"
         "Style parle, phrases courtes, max ~80 mots. Pas d'emojis. "
         "Termine par une ligne avec ces hashtags : "
         f"{HASHTAGS}\n\n"
