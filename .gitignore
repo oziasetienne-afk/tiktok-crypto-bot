@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# artefacts generes localement
+voice.mp3
+*.ass
+tokens.png
+chart.png
